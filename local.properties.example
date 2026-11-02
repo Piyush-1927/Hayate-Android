@@ -1,0 +1,5 @@
+# Copy these two lines into local.properties (gitignored), or set them as env vars.
+# Create a "Desktop app" OAuth client at https://console.cloud.google.com
+# (APIs & Services -> Credentials) and enable the Google Drive API.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
