@@ -1,0 +1,6 @@
+-keep class org.apache.commons.compress.** { *; }
+-keep class org.apache.commons.io.** { *; }
+-keep class com.yausername.** { *; }
+-keep class com.fasterxml.jackson.** { *; }
+-keepclasseswithmembernames class * { native <methods>; }
+-dontwarn **

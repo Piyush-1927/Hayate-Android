@@ -68,6 +68,50 @@ object YtProvider {
     /** want: "sub" | "eng" | "hin" */
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Outcome>>()
     private const val TTL = 30 * 60 * 1000L
+    private val watchOf = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val heightsCache = java.util.concurrent.ConcurrentHashMap<String, List<Int>>()
+    /** YouTube watch URL behind a stream URL this provider resolved (null for other providers). */
+    fun watchUrlFor(streamUrl: String): String? = watchOf[streamUrl]
+
+    private fun dump(ctx: Context, watch: String, fmt: String?): JSONObject? {
+        init(ctx)
+        val r = YoutubeDLRequest(watch).apply {
+            addOption("--no-playlist"); addOption("--no-warnings"); addOption("-j")
+            addOption("--extractor-args", "youtube:player_client=android")
+            if (fmt != null) addOption("-f", fmt)
+        }
+        return YoutubeDL.getInstance().execute(r).out.lineSequence()
+            .mapNotNull { runCatching { JSONObject(it) }.getOrNull() }.firstOrNull()
+    }
+
+    /** Heights (ascending, 144..1080, H.264) the video offers. Blocking. */
+    fun heights(ctx: Context, watch: String): List<Int> {
+        heightsCache[watch]?.let { return it }
+        val fs = dump(ctx, watch, null)?.optJSONArray("formats") ?: return emptyList()
+        val hs = sortedSetOf<Int>()
+        for (i in 0 until fs.length()) {
+            val f = fs.optJSONObject(i) ?: continue
+            val h = if (f.isNull("height")) 0 else f.optInt("height")
+            val pr = f.optString("protocol")
+            if (h in 144..1080 && f.optString("vcodec").startsWith("avc1") && f.optString("url").isNotEmpty() && (pr == "https" || pr == "http")) hs += h
+        }
+        return hs.toList().also { if (it.isNotEmpty()) heightsCache[watch] = it }
+    }
+
+    /** (videoUrl, audioUrl or null when the format is muxed). Blocking. */
+    fun resolve(ctx: Context, watch: String, h: Int): Pair<String, String?>? {
+        val d = dump(ctx, watch, "bv[height<=$h][vcodec^=avc1]+ba[ext=m4a]/b[height<=$h]/b") ?: return null
+        val rf = d.optJSONArray("requested_formats")
+        if (rf != null && rf.length() >= 2) {
+            var v: String? = null; var a: String? = null
+            for (i in 0 until rf.length()) {
+                val f = rf.optJSONObject(i) ?: continue
+                if (f.optString("vcodec", "none") != "none") v = f.optString("url") else a = f.optString("url")
+            }
+            if (!v.isNullOrEmpty() && !a.isNullOrEmpty()) return v to a
+        }
+        return d.optString("url").takeIf { it.isNotEmpty() }?.let { it to null }
+    }
 
     fun warmUp(ctx: Context) = runCatching { init(ctx) }
 
@@ -113,6 +157,7 @@ object YtProvider {
             addOption("-f", "best[ext=mp4]/best")
         }
         val url = YoutubeDL.getInstance().getInfo(req).url ?: return Outcome(null, "Couldn't resolve the stream.")
+        watchOf[url] = t
         return Outcome(StreamResult(url, "[$mu] $mt"))
     }
 }

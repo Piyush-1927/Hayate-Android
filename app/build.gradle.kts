@@ -12,17 +12,38 @@ val localProps = Properties().apply {
 fun cred(k: String): String = localProps.getProperty(k) ?: System.getenv(k) ?: ""
 
 android {
+    signingConfigs {
+        create("release") {
+            val kp = Properties().apply { load(rootProject.file("keystore.properties").inputStream()) }
+            storeFile = file(kp["storeFile"] as String)
+            storePassword = kp["storePassword"] as String
+            keyAlias = kp["keyAlias"] as String
+            keyPassword = kp["keyPassword"] as String
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = !project.hasProperty("noMinify")
+            isShrinkResources = !project.hasProperty("noMinify")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
     namespace = "com.hayate.app"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
+        ndk {
+            abiFilters += if (project.hasProperty("emu")) listOf("arm64-v8a", "x86_64") else listOf("arm64-v8a")
+        }
         applicationId = "com.hayate.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         buildConfigField("String", "GOOGLE_CLIENT_ID", "\"${cred("GOOGLE_CLIENT_ID")}\"")
         buildConfigField("String", "GOOGLE_CLIENT_SECRET", "\"${cred("GOOGLE_CLIENT_SECRET")}\"")
 
@@ -66,7 +87,8 @@ dependencies {
     implementation(libs.youtubedl.ffmpeg)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
-    implementation(libs.libmpv)
+    implementation(libs.exo.core)
+    implementation(libs.exo.hls)
     implementation(libs.coil.compose)
     implementation(libs.coil.network)
     testImplementation(libs.junit)

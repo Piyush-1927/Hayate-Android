@@ -12,7 +12,6 @@ youtubedl = "0.18.1"
 media3 = "1.10.1"
 coil = "3.3.0"
 
-libmpv = "1.0.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -35,7 +34,8 @@ media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", versi
 media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 coil-network = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
-libmpv = { group = "dev.jdtech.mpv", name = "libmpv", version.ref = "libmpv" }
+exo-core = { group = "androidx.media3", name = "media3-exoplayer", version = "1.5.1" }
+exo-hls = { group = "androidx.media3", name = "media3-exoplayer-hls", version = "1.5.1" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -19,6 +19,7 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.compose.runtime.collectAsState
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -145,6 +146,7 @@ private fun WatchContent(m: AnimeMedia, player: MpvPlayer, startEp: Int, restart
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val ps by player.state.collectAsState()
+    val hts by player.heights.collectAsState()
     val desc = remember(m.id) { HtmlCompat.fromHtml(m.description, HtmlCompat.FROM_HTML_MODE_COMPACT).toString().trim() }
     var lang by remember { mutableStateOf(com.hayate.app.Prefs.preferredAudio) }
     var busy by remember { mutableIntStateOf(0) }
@@ -160,6 +162,9 @@ private fun WatchContent(m: AnimeMedia, player: MpvPlayer, startEp: Int, restart
     var quals by remember { mutableStateOf<List<Pair<Int, String>>>(emptyList()) }
     var qual by remember { mutableIntStateOf(0) }
     var cur by remember { mutableStateOf<StreamResult?>(null) }
+    var ytWatch by remember { mutableStateOf<String?>(null) }
+    var ytQuals by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var ytDone by remember { mutableStateOf(false) }
     val skipPrefs = remember { ctx.getSharedPreferences("hayate", android.content.Context.MODE_PRIVATE) }
     var autoSkip by remember { mutableStateOf(skipPrefs.getBoolean("auto_skip", false)) }
     fun setAutoSkip(v: Boolean) { autoSkip = v; skipPrefs.edit().putBoolean("auto_skip", v).apply() }
@@ -191,15 +196,22 @@ private fun WatchContent(m: AnimeMedia, player: MpvPlayer, startEp: Int, restart
                 if (s != null) {
                     val startAt = if (fresh) 0.0 else ((HistoryStore.progress(m.id, ep)?.first ?: 0.0) - 3.0).coerceAtLeast(0.0)
                     fun bestOf(v: List<Pair<Int, String>>) = v.filter { it.first <= 720 }.maxByOrNull { it.first } ?: v.maxByOrNull { it.first }
-                    val guess = if (s.url.endsWith("/master.m3u8")) s.url.removeSuffix("master.m3u8") + "720/index.m3u8" else null
+                    val guess: String? = null
                     var vs0: List<Pair<Int, String>> = emptyList()
                     val target = guess ?: run {
-                        vs0 = withContext(Dispatchers.IO) { Providers.variants(s.url, s.referer) }
-                        bestOf(vs0)?.second ?: s.url
+                        
+                        s.url
                     }
                     current = ep; fresh = false; tLoad = android.os.SystemClock.elapsedRealtime()
                     player.load(target, s.referer, "", startAt)
-                    cur = s; quals = vs0; qual = if (guess != null) 720 else (bestOf(vs0)?.first ?: 0)
+                    cur = s; quals = vs0; qual = if (s.url.contains(".m3u8", true)) 720 else 0; player.setMaxHeight(qual)
+                    ytWatch = com.hayate.app.stream.YtProvider.watchUrlFor(s.url); ytQuals = emptyList(); ytDone = false
+                    ytWatch?.let { yw -> scope.launch {
+                        kotlinx.coroutines.delay(5000)
+                        if (current != ep) return@launch
+                        val hs = withContext(Dispatchers.IO) { runCatching { com.hayate.app.stream.YtProvider.heights(ctx.applicationContext, yw) }.getOrDefault(emptyList()) }
+                        if (current == ep) { ytQuals = hs; ytDone = true }
+                    } }
                     if (ep < total) Providers.prefetch(ctx, m.displayTitle, ep + 1, lang)
                     if (guess != null) scope.launch {
                         val vs = withContext(Dispatchers.IO) { Providers.variants(s.url, s.referer) }
@@ -222,9 +234,18 @@ private fun WatchContent(m: AnimeMedia, player: MpvPlayer, startEp: Int, restart
     }
     fun setQuality(h: Int) {
         val c = cur ?: return
-        val url = if (h == 0) c.url else quals.firstOrNull { it.first == h }?.second ?: return
-        qual = h
-        player.load(url, c.referer, c.subtitle, ps.position)
+        val yw = ytWatch
+        if (yw != null) {
+            val prev = qual; qual = h
+            scope.launch {
+                if (h == 0) { player.load(c.url, c.referer, c.subtitle, player.state.value.position); return@launch }
+                val r = withContext(Dispatchers.IO) { runCatching { com.hayate.app.stream.YtProvider.resolve(ctx.applicationContext, yw, h) }.getOrNull() }
+                if (r == null) { qual = prev; notice = "Couldn't load ${h}p"; return@launch }
+                player.load(r.first, c.referer, c.subtitle, player.state.value.position, r.second)
+            }
+            return
+        }
+        qual = h; player.setMaxHeight(h)
     }
     LaunchedEffect(Unit) { if (startEp > 0) play(startEp) }
     LaunchedEffect(ps.ended) { if (ps.ended) com.hayate.app.CloudSync.auto(); if (ps.ended && autoNext && current in 1 until total) play(current + 1) }
@@ -265,8 +286,18 @@ private fun WatchContent(m: AnimeMedia, player: MpvPlayer, startEp: Int, restart
         confirmButton = { TextButton({ showSet = false }) { Text("Done", color = HAccent) } },
         title = { Text("Player settings") },
         text = { Column(Modifier.verticalScroll(rememberScrollState())) {
-            SetRow("Quality", listOf(0 to "Auto") + quals.map { it.first to "${it.first}p" }, qual) { setQuality(it) }
-            if (quals.isEmpty()) Text("Other qualities aren't available for this stream.", color = HMuted, fontSize = 11.sp)
+            val isYt = ytWatch != null
+            val std = listOf(360, 480, 720, 1080)
+            val qOpts = if (isYt) listOf(0 to "Auto") + ytQuals.map { it to "${it}p" }
+                else if (hts.size == 1) listOf(hts[0] to "${hts[0]}p")
+                else listOf(0 to "Auto") + (if (hts.size >= 2) hts else std).map { it to "${it}p" }
+            val qSel = if (isYt) qual else if (hts.size == 1) hts[0] else if (qual == 0) 0
+                else if (hts.isEmpty()) (std.minByOrNull { abs(it - qual) } ?: 0)
+                else (hts.filter { it <= qual }.maxOrNull() ?: hts.minOrNull() ?: 0)
+            SetRow("Quality", qOpts, qSel) { setQuality(it) }
+            if (isYt && !ytDone) Text("Checking available qualities…", color = HMuted, fontSize = 11.sp)
+            else if (isYt && ytQuals.isEmpty()) Text("No other qualities found for this video.", color = HMuted, fontSize = 11.sp)
+            else if (!isYt && hts.size == 1) Text("Other qualities aren't available for this stream.", color = HMuted, fontSize = 11.sp)
             SetRow("Subtitles", listOf(1 to "On", 0 to "Off"), if (subsOn) 1 else 0) { subsOn = it == 1; player.setSubs(subsOn) }
             SetRow("Speed", listOf(50 to "0.5x", 75 to "0.75x", 100 to "1x", 125 to "1.25x", 150 to "1.5x", 200 to "2x"), speedPct) {
                 speedPct = it; player.setSpeed(it / 100.0)
@@ -335,6 +366,10 @@ private fun WatchContent(m: AnimeMedia, player: MpvPlayer, startEp: Int, restart
                 }
             }
             WatchRelations(m)
+            com.hayate.app.comments.CommentsSection(
+                anilistId = m.id, episode = current.takeIf { it >= 1 },
+                bg = HBg, panel = WPanel, border = WBorder, accent = HAccent, text = HText, muted = HMuted,
+            )
             Spacer(Modifier.navigationBarsPadding().height(28.dp))
         }
     }
@@ -410,6 +445,12 @@ private fun WatchContent(m: AnimeMedia, player: MpvPlayer, startEp: Int, restart
                 }
             }
             Box(Modifier.padding(horizontal = 12.dp)) { WatchRelations(m) }
+            Box(Modifier.padding(horizontal = 12.dp)) {
+                com.hayate.app.comments.CommentsSection(
+                    anilistId = m.id, episode = current.takeIf { it >= 1 },
+                    bg = HBg, panel = WPanel, border = WBorder, accent = HAccent, text = HText, muted = HMuted,
+                )
+            }
             Spacer(Modifier.navigationBarsPadding().height(24.dp))
         }
     } else Column(Modifier.fillMaxSize().background(HBg)) {
@@ -536,7 +577,16 @@ internal fun PlayerBox(m: AnimeMedia?, player: MpvPlayer, ps: PlayerState, busy:
     }
     LaunchedEffect(hudTick) { if (hud != null) { delay(900); hud = null } }
     Box(modifier.background(Color.Black)
-        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controls = !controls }
+        .pointerInput(Unit) {
+            detectTapGestures(
+                onTap = { controls = !controls },
+                onDoubleTap = { o ->
+                    val back = o.x < size.width / 2f
+                    player.seekBy(if (back) -10.0 else 10.0)
+                    hud = if (back) "-10s" else "+10s"; hudTick++
+                },
+            )
+        }
         .then(if (full) Modifier.pointerInput(Unit) {
             awaitEachGesture {
                 val dn = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
@@ -580,6 +630,8 @@ internal fun PlayerBox(m: AnimeMedia?, player: MpvPlayer, ps: PlayerState, busy:
                 hudTick++
             }
         } else Modifier)) {
+        val ar by player.aspect.collectAsState()
+        val subText by player.subtitle.collectAsState()
         AndroidView(factory = { c ->
             SurfaceView(c).apply {
                 holder.addCallback(object : SurfaceHolder.Callback {
@@ -588,7 +640,10 @@ internal fun PlayerBox(m: AnimeMedia?, player: MpvPlayer, ps: PlayerState, busy:
                     override fun surfaceDestroyed(h: SurfaceHolder) { player.detach() }
                 })
             }
-        }, modifier = Modifier.fillMaxSize())
+        }, modifier = if (ar > 0f) Modifier.align(Alignment.Center).aspectRatio(ar) else Modifier.fillMaxSize())
+        if (subText.isNotEmpty() && ps.active) Text(subText, color = Color.White, fontSize = 15.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 24.dp, vertical = 40.dp)
+                .clip(RoundedCornerShape(6.dp)).background(Color(0x99000000)).padding(horizontal = 8.dp, vertical = 2.dp))
         if (!ps.active) {
             AsyncImage(model = m?.bannerUrl ?: m?.coverUrl, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             Box(Modifier.fillMaxSize().background(Color(0x99000000)))
@@ -598,6 +653,11 @@ internal fun PlayerBox(m: AnimeMedia?, player: MpvPlayer, ps: PlayerState, busy:
             .clip(RoundedCornerShape(20.dp)).background(Color(0xCC12121C)).padding(horizontal = 16.dp, vertical = 8.dp)) }
         AnimatedVisibility(controls && ps.active, Modifier.fillMaxSize(), enter = fadeIn(), exit = fadeOut()) {
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x66000000), Color.Transparent, Color(0xCC000000))))) {
+                if (!ps.loading) Box(Modifier.align(Alignment.Center).size(64.dp).clip(CircleShape).background(Color(0x99000000))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { player.togglePause() },
+                    contentAlignment = Alignment.Center) {
+                    Text(if (ps.paused) "\u25B6" else "\u275A\u275A", color = Color.White, fontSize = 24.sp)
+                }
                 Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp)) {
                     val dur = ps.duration.coerceAtLeast(1.0)
                     val shownPos = drag?.toDouble() ?: ps.position
